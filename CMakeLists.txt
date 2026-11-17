@@ -6,6 +6,9 @@ string(REGEX MATCH "AC_INIT\\(\\[libogg\\],\\[([0-9]*\\.[0-9]*\\.[0-9]*)\\]" DUM
 
 project(ogg VERSION ${CMAKE_MATCH_1} LANGUAGES C)
 
+# Defines the BUILD_TESTING option (default ON) and enables ctest.
+include(CTest)
+
 # Required modules
 include(GNUInstallDirs)
 include(CheckIncludeFiles)
@@ -194,6 +197,12 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_BINARY_DIR}/include
     )
     add_test(NAME test_framing COMMAND $<TARGET_FILE:test_framing>)
+
+    # Drives the public decoder API against deterministic, hand-built
+    # pages to check page-boundary / continued-packet semantics.
+    add_executable(test_continued src/test_continued.c ${OGG_HEADERS})
+    target_link_libraries(test_continued PRIVATE ogg)
+    add_test(NAME test_continued COMMAND $<TARGET_FILE:test_continued>)
 endif()
 
 set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
