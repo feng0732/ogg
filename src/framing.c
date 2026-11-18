@@ -1679,6 +1679,334 @@ void test_pack(const int *pl, const int **headers, int byteskip,
   fprintf(stderr,"ok.\n");
 }
 
+/* Logical stream reuse: BOS/EOS state from a finished stream must not
+   leak into the next stream that shares the same ogg_stream_state.
+   These tests only observe the public API and use fixed input data, so
+   a reset that fails to clear any part of the state shows up as a wrong
+   page flag, page number, packet number, or packet payload. */
+
+static void reuse_check(int condition,const char *message){
+  if(!condition){
+    fprintf(stderr,"stream reuse check failed: %s\n",message);
+    exit(1);
+  }
+}
+
+static void reuse_save_page(ogg_page *dst,ogg_page *src,const char *message){
+  *dst=*src;
+  if(copy_page(dst)<0){
+    fprintf(stderr,"unable to copy page: %s\n",message);
+    exit(1);
+  }
+}
+
+static void reuse_packetin(ogg_stream_state *os,const unsigned char *data,
+                           long bytes,long e_o_s,ogg_int64_t granulepos,
+                           const char *message){
+  ogg_packet op;
+  memset(&op,0,sizeof(op));
+  op.packet=(unsigned char *)data;
+  op.bytes=bytes;
+  op.e_o_s=e_o_s;
+  op.granulepos=granulepos;
+  reuse_check(ogg_stream_packetin(os,&op)==0,message);
+}
+
+/* 1. A stream runs to EOS, then a new stream is started on the same
+      ogg_stream_state.  The new stream must start with a fresh BOS page
+      at page 0 and must not inherit the old EOS state. */
+static void test_stream_restart(void){
+  ogg_stream_state enc,dec;
+  ogg_page og,a0,a1,b0,b1;
+  ogg_packet op;
+  static const unsigned char a0_data[]={0x10,0x11,0x12,0x13,0x14};
+  static const unsigned char a1_data[]={0x20,0x21,0x22,0x23,
+                                        0x24,0x25,0x26,0x27,0x28,0x29,0x2a};
+  static const unsigned char b0_data[]={0x30,0x31,0x32,0x33,0x34,0x35};
+  static const unsigned char b1_data[]={0x40,0x41,0x42};
+
+  fprintf(stderr,"testing stream reuse after EOS... ");
+
+  reuse_check(ogg_stream_init(&enc,0x0badf00d)==0,"init encoder");
+  reuse_check(ogg_stream_init(&dec,0x0badf00d)==0,"init decoder");
+
+  /* Stream A: BOS page, then an EOS page. */
+  reuse_packetin(&enc,a0_data,sizeof(a0_data),0,0,"stream A packet 0");
+  reuse_check(ogg_stream_pageout(&enc,&og)==1,"stream A page 0");
+  reuse_save_page(&a0,&og,"stream A page 0");
+  reuse_check(ogg_page_bos(&a0)!=0,"stream A page 0 BOS");
+  reuse_check(ogg_page_eos(&a0)==0,"stream A page 0 no EOS");
+  reuse_check(ogg_page_continued(&a0)==0,"stream A page 0 not continued");
+  reuse_check(ogg_page_pageno(&a0)==0,"stream A page 0 pageno");
+  reuse_check(ogg_page_serialno(&a0)==0x0badf00d,"stream A page 0 serial");
+
+  reuse_packetin(&enc,a1_data,sizeof(a1_data),1,1000,"stream A packet 1");
+  reuse_check(ogg_stream_flush(&enc,&og)==1,"stream A page 1");
+  reuse_save_page(&a1,&og,"stream A page 1");
+  reuse_check(ogg_page_bos(&a1)==0,"stream A page 1 no BOS");
+  reuse_check(ogg_page_eos(&a1)!=0,"stream A page 1 EOS");
+  reuse_check(ogg_page_continued(&a1)==0,"stream A page 1 not continued");
+  reuse_check(ogg_page_pageno(&a1)==1,"stream A page 1 pageno");
+  reuse_check(ogg_stream_eos(&enc)==1,"encoder reports EOS for stream A");
+  reuse_check(ogg_stream_flush(&enc,&og)==0,"stream A encoder drained");
+
+  /* Decode stream A completely. */
+  reuse_check(ogg_stream_pagein(&dec,&a0)==0,"decode stream A page 0");
+  reuse_check(ogg_stream_packetout(&dec,&op)==1,"decode stream A packet 0");
+  reuse_check(op.bytes==(long)sizeof(a0_data),"stream A packet 0 bytes");
+  reuse_check(memcmp(op.packet,a0_data,sizeof(a0_data))==0,
+              "stream A packet 0 data");
+  reuse_check(op.b_o_s&&!op.e_o_s,"stream A packet 0 BOS/EOS");
+  reuse_check(op.packetno==0,"stream A packet 0 packetno");
+
+  reuse_check(ogg_stream_pagein(&dec,&a1)==0,"decode stream A page 1");
+  reuse_check(ogg_stream_packetout(&dec,&op)==1,"decode stream A packet 1");
+  reuse_check(op.bytes==(long)sizeof(a1_data),"stream A packet 1 bytes");
+  reuse_check(memcmp(op.packet,a1_data,sizeof(a1_data))==0,
+              "stream A packet 1 data");
+  reuse_check(!op.b_o_s&&op.e_o_s,"stream A packet 1 BOS/EOS");
+  reuse_check(op.packetno==1,"stream A packet 1 packetno");
+  reuse_check(op.granulepos==1000,"stream A packet 1 granulepos");
+  reuse_check(ogg_stream_packetout(&dec,&op)==0,"stream A decoder drained");
+  reuse_check(ogg_stream_eos(&dec)==1,"decoder reports EOS for stream A");
+
+  /* Restart both ends on the same states. */
+  reuse_check(ogg_stream_reset(&enc)==0,"reset encoder");
+  reuse_check(ogg_stream_reset(&dec)==0,"reset decoder");
+  reuse_check(ogg_stream_eos(&enc)==0,"encoder EOS cleared by reset");
+  reuse_check(ogg_stream_eos(&dec)==0,"decoder EOS cleared by reset");
+
+  /* Stream B: a fresh BOS page at page 0, then its own EOS page. */
+  reuse_packetin(&enc,b0_data,sizeof(b0_data),0,42,"stream B packet 0");
+  reuse_check(ogg_stream_pageout(&enc,&og)==1,"stream B page 0");
+  reuse_save_page(&b0,&og,"stream B page 0");
+  reuse_check(ogg_page_bos(&b0)!=0,"stream B page 0 BOS");
+  reuse_check(ogg_page_eos(&b0)==0,"stream B page 0 no stale EOS");
+  reuse_check(ogg_page_continued(&b0)==0,"stream B page 0 not continued");
+  reuse_check(ogg_page_pageno(&b0)==0,"stream B page 0 pageno restarts");
+  reuse_check(ogg_page_serialno(&b0)==0x0badf00d,"stream B page 0 serial");
+  reuse_check(b0.body_len==(long)sizeof(b0_data),
+              "stream B page 0 carries only new data");
+  reuse_check(memcmp(b0.body,b0_data,sizeof(b0_data))==0,
+              "stream B page 0 body");
+
+  reuse_packetin(&enc,b1_data,sizeof(b1_data),1,99,"stream B packet 1");
+  reuse_check(ogg_stream_flush(&enc,&og)==1,"stream B page 1");
+  reuse_save_page(&b1,&og,"stream B page 1");
+  reuse_check(ogg_page_bos(&b1)==0,"stream B page 1 no BOS");
+  reuse_check(ogg_page_eos(&b1)!=0,"stream B page 1 EOS");
+  reuse_check(ogg_page_continued(&b1)==0,"stream B page 1 not continued");
+  reuse_check(ogg_page_pageno(&b1)==1,"stream B page 1 pageno");
+  reuse_check(ogg_page_granulepos(&b1)==99,"stream B page 1 granulepos");
+
+  reuse_check(ogg_stream_pagein(&dec,&b0)==0,"decode stream B page 0");
+  reuse_check(ogg_stream_packetout(&dec,&op)==1,"decode stream B packet 0");
+  reuse_check(op.bytes==(long)sizeof(b0_data),"stream B packet 0 bytes");
+  reuse_check(memcmp(op.packet,b0_data,sizeof(b0_data))==0,
+              "stream B packet 0 data");
+  reuse_check(op.b_o_s&&!op.e_o_s,"stream B packet 0 BOS/EOS");
+  reuse_check(op.packetno==0,"stream B packet 0 packetno restarts");
+  reuse_check(ogg_stream_eos(&dec)==0,"decoder EOS clear mid stream B");
+
+  reuse_check(ogg_stream_pagein(&dec,&b1)==0,"decode stream B page 1");
+  reuse_check(ogg_stream_packetout(&dec,&op)==1,"decode stream B packet 1");
+  reuse_check(memcmp(op.packet,b1_data,sizeof(b1_data))==0,
+              "stream B packet 1 data");
+  reuse_check(!op.b_o_s&&op.e_o_s,"stream B packet 1 BOS/EOS");
+  reuse_check(op.packetno==1,"stream B packet 1 packetno");
+  reuse_check(ogg_stream_packetout(&dec,&op)==0,"stream B decoder drained");
+
+  free_page(&a0);
+  free_page(&a1);
+  free_page(&b0);
+  free_page(&b1);
+  ogg_stream_clear(&enc);
+  ogg_stream_clear(&dec);
+  fprintf(stderr,"ok.\n");
+}
+
+/* 2. Page flags must interleave correctly, and packets or partial
+      packets buffered when a stream ends must not survive a reset. */
+static void test_flag_interleaving_and_residue(void){
+  ogg_stream_state enc,dec,big;
+  ogg_page og,a0,part,b0;
+  ogg_packet op;
+  unsigned char *big_data;
+  long i;
+  static const unsigned char c0_data[]={0x60,0x61,0x62};
+  static const unsigned char b0_data[]={0x70,0x71,0x72,0x73,0x74};
+  static const unsigned char residue_data[]={0x7e,0x7f};
+
+  fprintf(stderr,"testing page flags and residual packets across reuse... ");
+
+  reuse_check(ogg_stream_init(&enc,0x12345678)==0,"init encoder");
+  reuse_check(ogg_stream_init(&dec,0x12345678)==0,"init decoder");
+
+  /* An unflushed EOS packet is pending when the stream is abandoned.
+     Reset must discard it instead of emitting a page for the new stream. */
+  reuse_packetin(&enc,residue_data,sizeof(residue_data),1,555,
+                 "pending EOS packet");
+  reuse_check(ogg_stream_reset(&enc)==0,"reset encoder with pending packet");
+  reuse_check(ogg_stream_eos(&enc)==0,"pending EOS cleared by reset");
+  reuse_check(ogg_stream_flush(&enc,&og)==0,"no page flushed from residue");
+
+  /* A single-packet stream is BOS and EOS on the same page, but it is
+     not a continued page.  The next stream's first page must be BOS
+     without EOS even though the previous stream ended at once. */
+  reuse_packetin(&enc,c0_data,sizeof(c0_data),1,500,"single-packet stream");
+  reuse_check(ogg_stream_pageout(&enc,&og)==1,"single-packet page");
+  reuse_save_page(&a0,&og,"single-packet page");
+  reuse_check(ogg_page_bos(&a0)!=0,"single-packet page BOS");
+  reuse_check(ogg_page_eos(&a0)!=0,"single-packet page EOS");
+  reuse_check(ogg_page_continued(&a0)==0,"single-packet page not continued");
+  reuse_check(ogg_page_pageno(&a0)==0,"single-packet page pageno");
+
+  /* Retargeting the serial number clears the same state; a page from the
+     old serial must be rejected and leave the decoder untouched. */
+  reuse_check(ogg_stream_reset_serialno(&enc,0x0a0b0c0d)==0,
+              "encoder reset_serialno");
+  reuse_packetin(&enc,b0_data,sizeof(b0_data),0,17,"new serial packet");
+  reuse_check(ogg_stream_pageout(&enc,&og)==1,"new serial first page");
+  reuse_save_page(&b0,&og,"new serial first page");
+  reuse_check(ogg_page_bos(&b0)!=0,"new serial first page BOS");
+  reuse_check(ogg_page_eos(&b0)==0,"new serial first page no EOS");
+  reuse_check(ogg_page_pageno(&b0)==0,"new serial first page pageno");
+  reuse_check(ogg_page_serialno(&b0)==0x0a0b0c0d,"new serial number");
+
+  reuse_check(ogg_stream_reset_serialno(&dec,0x0a0b0c0d)==0,
+              "decoder reset_serialno");
+  reuse_check(ogg_stream_pagein(&dec,&a0)==-1,"old serial page rejected");
+  reuse_check(ogg_stream_packetout(&dec,&op)==0,
+              "rejected page produced no packet");
+  reuse_check(ogg_stream_eos(&dec)==0,"rejected page left EOS clear");
+
+  /* An unread, complete packet buffered when the stream is reset must not
+     be returned for the new stream. */
+  reuse_check(ogg_stream_pagein(&dec,&b0)==0,"decode new serial page");
+  reuse_check(ogg_stream_packetout(&dec,&op)==1,"new serial packet");
+  reuse_check(op.packetno==0,"new serial packet packetno");
+  reuse_check(op.bytes==(long)sizeof(b0_data),"new serial packet bytes");
+  reuse_check(memcmp(op.packet,b0_data,sizeof(b0_data))==0,
+              "new serial packet data");
+  reuse_check(op.b_o_s&&!op.e_o_s,"new serial packet BOS/EOS");
+
+  /* Partial packet residue: the first page of a multi-page packet leaves
+     the decoder holding segments with no complete packet. */
+  reuse_check(ogg_stream_init(&big,0x0a0b0c0d)==0,"init large packet encoder");
+  big_data=_ogg_malloc(255*255);
+  reuse_check(big_data!=NULL,"large packet buffer");
+  for(i=0;i<255*255;i++)big_data[i]=(unsigned char)((i*7+3)&0xff);
+  reuse_packetin(&big,big_data,255*255,0,0,"large packet");
+  reuse_check(ogg_stream_pageout(&big,&og)==1,"large packet first page");
+  reuse_check(ogg_page_continued(&og)==0,"large packet first page not continued");
+  reuse_check(ogg_page_packets(&og)==0,"large packet first page no packets");
+  reuse_check(og.header[26]==255,"large packet first page full segment table");
+  reuse_save_page(&part,&og,"large packet first page");
+  _ogg_free(big_data);
+
+  reuse_check(ogg_stream_reset(&dec)==0,"reset decoder with partial packet");
+  reuse_check(ogg_stream_pagein(&dec,&part)==0,"decode partial large packet");
+  reuse_check(ogg_stream_packetout(&dec,&op)==0,
+              "partial large packet yields no packet");
+  reuse_check(ogg_stream_packetpeek(&dec,&op)==0,
+              "partial large packet peek empty");
+
+  reuse_check(ogg_stream_reset(&dec)==0,"reset decoder with partial residue");
+  reuse_check(ogg_stream_pagein(&dec,&b0)==0,"decode after partial residue");
+  reuse_check(ogg_stream_packetout(&dec,&op)==1,
+              "first packet after partial residue is not a gap");
+  reuse_check(op.packetno==0,"packet after partial residue packetno 0");
+  reuse_check(op.bytes==(long)sizeof(b0_data),
+              "packet after partial residue bytes");
+  reuse_check(memcmp(op.packet,b0_data,sizeof(b0_data))==0,
+              "packet after partial residue data");
+
+  free_page(&a0);
+  free_page(&part);
+  free_page(&b0);
+  ogg_stream_clear(&enc);
+  ogg_stream_clear(&dec);
+  ogg_stream_clear(&big);
+  fprintf(stderr,"ok.\n");
+}
+
+/* 3. The first packet of a restarted stream must restart its sequence at
+      zero, carry BOS and not EOS, be emitted with the right payload and
+      granule position, and report no EOS until its own end. */
+static void test_first_packet_after_restart(void){
+  ogg_stream_state enc,dec;
+  ogg_page og,first,last;
+  ogg_packet op;
+  static const unsigned char old_data[]={0x80,0x81,0x82,0x83,0x84,0x85};
+  static const unsigned char first_data[]={0x90,0x91,0x92};
+  static const unsigned char last_data[]={0xa0,0xa1,0xa2,0xa3};
+
+  fprintf(stderr,"testing first packet of restarted stream... ");
+
+  reuse_check(ogg_stream_init(&enc,0x01020304)==0,"init encoder");
+  reuse_check(ogg_stream_init(&dec,0x01020304)==0,"init decoder");
+
+  /* Finish an old stream so every field that could leak is populated. */
+  reuse_packetin(&enc,old_data,sizeof(old_data),1,4000,"old stream packet");
+  reuse_check(ogg_stream_flush(&enc,&og)==1,"old stream page");
+  reuse_check(ogg_stream_pagein(&dec,&og)==0,"decode old stream page");
+  reuse_check(ogg_stream_packetout(&dec,&op)==1,"decode old stream packet");
+  reuse_check(op.packetno==0&&op.b_o_s&&op.e_o_s,"old stream packet flags");
+  reuse_check(ogg_stream_eos(&dec)==1,"old stream ended");
+
+  reuse_check(ogg_stream_reset(&enc)==0,"reset encoder");
+  reuse_check(ogg_stream_reset(&dec)==0,"reset decoder");
+
+  /* New stream: first page must be BOS-only, page 0, initial granule 0. */
+  reuse_packetin(&enc,first_data,sizeof(first_data),0,1234,"new first packet");
+  reuse_check(ogg_stream_pageout(&enc,&og)==1,"new first page");
+  reuse_save_page(&first,&og,"new first page");
+  reuse_check(ogg_page_bos(&first)!=0,"new first page BOS");
+  reuse_check(ogg_page_eos(&first)==0,"new first page no EOS");
+  reuse_check(ogg_page_continued(&first)==0,"new first page not continued");
+  reuse_check(ogg_page_pageno(&first)==0,"new first page pageno 0");
+  reuse_check(ogg_page_granulepos(&first)==0,"new first page granulepos 0");
+  reuse_check(ogg_page_serialno(&first)==0x01020304,"new first page serial");
+
+  /* Decoded first packet: packetno restarts at 0, BOS set, EOS clear,
+     and the payload is exactly the newly submitted bytes. */
+  reuse_check(ogg_stream_pagein(&dec,&first)==0,"decode new first page");
+  reuse_check(ogg_stream_packetout(&dec,&op)==1,"new first packet decoded");
+  reuse_check(op.packetno==0,"new first packet packetno 0");
+  reuse_check(op.b_o_s&&!op.e_o_s,"new first packet BOS/EOS");
+  reuse_check(op.bytes==(long)sizeof(first_data),"new first packet bytes");
+  reuse_check(memcmp(op.packet,first_data,sizeof(first_data))==0,
+              "new first packet data");
+  reuse_check(op.granulepos==0,"new first packet granulepos 0");
+  reuse_check(ogg_stream_packetout(&dec,&op)==0,"no packet before second page");
+  reuse_check(ogg_stream_eos(&dec)==0,"no EOS after new first packet");
+
+  /* Second packet continues the new sequence: packetno 1, no BOS, EOS. */
+  reuse_packetin(&enc,last_data,sizeof(last_data),1,4321,"new last packet");
+  reuse_check(ogg_stream_flush(&enc,&og)==1,"new last page");
+  reuse_save_page(&last,&og,"new last page");
+  reuse_check(ogg_page_bos(&last)==0,"new last page no BOS");
+  reuse_check(ogg_page_eos(&last)!=0,"new last page EOS");
+  reuse_check(ogg_page_pageno(&last)==1,"new last page pageno 1");
+
+  reuse_check(ogg_stream_pagein(&dec,&last)==0,"decode new last page");
+  reuse_check(ogg_stream_packetout(&dec,&op)==1,"new last packet decoded");
+  reuse_check(op.packetno==1,"new last packet packetno 1");
+  reuse_check(!op.b_o_s&&op.e_o_s,"new last packet BOS/EOS");
+  reuse_check(op.bytes==(long)sizeof(last_data),"new last packet bytes");
+  reuse_check(memcmp(op.packet,last_data,sizeof(last_data))==0,
+              "new last packet data");
+  reuse_check(op.granulepos==4321,"new last packet granulepos");
+  reuse_check(ogg_stream_packetout(&dec,&op)==0,"new stream drained");
+  reuse_check(ogg_stream_eos(&dec)==1,"new stream ends at its own EOS");
+
+  free_page(&first);
+  free_page(&last);
+  ogg_stream_clear(&enc);
+  ogg_stream_clear(&dec);
+  fprintf(stderr,"ok.\n");
+}
+
 int main(void){
 
   ogg_stream_init(&os_en,0x04030201);
@@ -2128,6 +2456,10 @@ int main(void){
       }
     }
   }
+  test_stream_restart();
+  test_flag_interleaving_and_residue();
+  test_first_packet_after_restart();
+
   ogg_sync_clear(&oy);
   ogg_stream_clear(&os_en);
   ogg_stream_clear(&os_de);
