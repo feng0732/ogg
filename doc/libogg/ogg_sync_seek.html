@@ -1,0 +1,135 @@
+<html>
+
+<head>
+<title>libogg - function - ogg_sync_seek</title>
+<link rel=stylesheet href="style.css" type="text/css">
+</head>
+
+<body bgcolor=white text=black link="#5555ff" alink="#5555ff" vlink="#5555ff">
+<table border=0 width=100%>
+<tr>
+<td><p class=tiny>libogg documentation</p></td>
+<td align=right><p class=tiny>libogg release 1.3.6 - 20250616</p></td>
+</tr>
+</table>
+
+<h1>ogg_sync_seek</h1>
+
+<p><i>declared in "ogg/ogg.h";</i></p>
+
+<p>This function repositions a seekable datasource so that decoding of
+one logical bitstream can resume at the first packet whose ending
+granule position is greater than or equal to a requested target.  It
+is the primitive needed to implement "scrubbing" (drag-to-seek) in a
+player.
+
+<p>The caller supplies read/seek/tell callbacks for the datasource
+along with the serial number of the logical stream and the target
+granule position.  The function performs a bisection search over the
+datasource, so the amount of data read grows logarithmically with the
+file length.  Multiplexed (interleaved) logical streams, chained
+segments, pages that carry no ending granule position and packets
+spanning multiple pages are all handled.
+
+<p>On success the datasource is left positioned at the beginning of
+the page carrying the most recent known granule position before the
+target (or at the first page of the stream if there is none), the
+<a href="ogg_sync_state.html">ogg_sync_state</a> is reset and ready to
+be refilled, and the <a
+href="ogg_stream_state.html">ogg_stream_state</a> (if given) is reset
+so that continued decoding does not report a hole at the seek point.
+Decoding simply continues with the usual
+<a href="ogg_sync_buffer.html">ogg_sync_buffer</a> /
+<a href="ogg_sync_wrote.html">ogg_sync_wrote</a> /
+<a href="ogg_sync_pageout.html">ogg_sync_pageout</a> /
+<a href="ogg_stream_pagein.html">ogg_stream_pagein</a> /
+<a href="ogg_stream_packetout.html">ogg_stream_packetout</a> loop.
+
+<br><br>
+<table border=0 color=black cellspacing=0 cellpadding=7>
+<tr bgcolor=#cccccc>
+	<td>
+<pre><b>
+int ogg_sync_seek(<a href="ogg_sync_state.html">ogg_sync_state</a> *oy, <a href="ogg_stream_state.html">ogg_stream_state</a> *os,
+                  long serialno, ogg_int64_t target,
+                  const ogg_seek_callbacks *cb, void *datasource);
+</b></pre>
+	</td>
+</tr>
+</table>
+
+<h3>Parameters</h3>
+<dl>
+<dt><i>oy</i></dt>
+<dd>Pointer to an initialized <a href="ogg_sync_state.html">ogg_sync_state</a> struct.  It is used during the search and is left reset on return.</dd>
+<dt><i>os</i></dt>
+<dd>Pointer to the <a href="ogg_stream_state.html">ogg_stream_state</a> of the logical stream being sought, or NULL.  If non-NULL it is reset on a successful seek so that no spurious data gap is reported; it must belong to <i>serialno</i>.</dd>
+<dt><i>serialno</i></dt>
+<dd>Serial number of the logical bitstream to seek within.</dd>
+<dt><i>target</i></dt>
+<dd>Target granule position.  Decoding will resume such that the first packet ending at or after this position is produced.</dd>
+<dt><i>cb</i></dt>
+<dd>Pointer to an ogg_seek_callbacks struct supplying read, seek and tell primitives for the datasource:
+<pre>
+typedef struct {
+  size_t      (*read_func)(void *ptr, size_t size, void *datasource);
+  int         (*seek_func)(void *datasource, ogg_int64_t offset, int whence);
+  ogg_int64_t (*tell_func)(void *datasource);
+} ogg_seek_callbacks;
+</pre>
+<i>read_func</i> reads up to <i>size</i> bytes and returns the number
+of bytes read (0 at end of data).  <i>seek_func</i> repositions the
+datasource; <i>whence</i> is one of OGG_SEEK_SET, OGG_SEEK_CUR or
+OGG_SEEK_END (mirroring SEEK_SET/SEEK_CUR/SEEK_END) and the return
+value is zero on success.  <i>tell_func</i> returns the current
+absolute offset.</dd>
+<dt><i>datasource</i></dt>
+<dd>Opaque pointer passed through to the callbacks.</dd>
+</dl>
+
+<h3>Return Values</h3>
+<blockquote>
+<li>OGG_SEEK_OK (0): success; the datasource is positioned and decoding may continue.</li>
+<li>OGG_SEEK_EINVAL: invalid argument (NULL state or callbacks, negative target).</li>
+<li>OGG_SEEK_EREAD: a read from the datasource failed.</li>
+<li>OGG_SEEK_ENOSEEK: the datasource is not seekable.</li>
+<li>OGG_SEEK_ENOSTREAM: no logical stream with the requested serial number exists.</li>
+<li>OGG_SEEK_ERANGE: the target granule position lies beyond the end of the stream.</li>
+</blockquote>
+<p>On failure the datasource position is restored to where it was
+before the call.</p>
+
+<h3>Example Usage</h3>
+<pre>
+static size_t io_read(void *ptr, size_t size, void *d){
+  return fread(ptr, 1, size, (FILE *)d);
+}
+static int io_seek(void *d, ogg_int64_t off, int whence){
+  return fseek((FILE *)d, (long)off, whence); /* OGG_SEEK_* match SEEK_* */
+}
+static ogg_int64_t io_tell(void *d){
+  return (ogg_int64_t)ftell((FILE *)d);
+}
+
+  ogg_seek_callbacks cb = { io_read, io_seek, io_tell };
+  if(ogg_sync_seek(&oy, &os, serialno, target_granule, &cb, fp) == OGG_SEEK_OK){
+    /* continue the normal decode loop from here */
+  }
+</pre>
+
+<br><br>
+<hr noshade>
+<table border=0 width=100%>
+<tr valign=top>
+<td><p class=tiny>copyright &copy; 2000-2021 Xiph.Org Foundation</p></td>
+<td align=right><p class=tiny><a href="http://www.xiph.org/ogg/">Ogg Container Format</a></p></td>
+</tr><tr>
+<td><p class=tiny>libogg documentation</p></td>
+<td align=right><p class=tiny>libogg release 1.3.6 - 20250616</p></td>
+</tr>
+</table>
+
+
+</body>
+
+</html>

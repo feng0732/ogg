@@ -14,7 +14,7 @@ dist_apidoc_DATA = bitpacking.html datastructures.html decoding.html encoding.ht
 	ogg_stream_pageout.html ogg_stream_pageout_fill.html ogg_stream_reset.html\
 	ogg_stream_reset_serialno.html ogg_stream_state.html\
 	ogg_sync_buffer.html ogg_sync_check.html ogg_sync_clear.html ogg_sync_destroy.html\
-	ogg_sync_init.html ogg_sync_pageout.html ogg_sync_pageseek.html\
+	ogg_sync_init.html ogg_sync_pageout.html ogg_sync_pageseek.html ogg_sync_seek.html\
 	ogg_sync_reset.html ogg_sync_state.html ogg_sync_wrote.html\
 	oggpack_adv.html oggpack_adv1.html oggpack_bits.html\
 	oggpack_buffer.html oggpack_bytes.html oggpack_get_buffer.html\

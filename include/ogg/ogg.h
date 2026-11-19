@@ -112,6 +112,36 @@ typedef struct {
   int bodybytes;
 } ogg_sync_state;
 
+/* ogg_seek_callbacks provides the I/O primitives used by ogg_sync_seek()
+   to navigate a seekable data source **************************************/
+
+typedef struct {
+  /* read up to 'size' bytes into 'ptr'; returns the number of bytes
+     actually read (0 indicates end of data) */
+  size_t       (*read_func)(void *ptr, size_t size, void *datasource);
+  /* reposition the datasource; 'whence' is one of OGG_SEEK_SET,
+     OGG_SEEK_CUR or OGG_SEEK_END.  Returns 0 on success, nonzero on
+     failure */
+  int          (*seek_func)(void *datasource, ogg_int64_t offset, int whence);
+  /* return the current absolute offset of the datasource, or -1 on
+     failure */
+  ogg_int64_t  (*tell_func)(void *datasource);
+} ogg_seek_callbacks;
+
+/* whence values for the seek_func callback (mirroring the semantics of
+   SEEK_SET/SEEK_CUR/SEEK_END) */
+#define OGG_SEEK_SET 0
+#define OGG_SEEK_CUR 1
+#define OGG_SEEK_END 2
+
+/* ogg_sync_seek() return values */
+#define OGG_SEEK_OK         0  /* success; demuxing may continue */
+#define OGG_SEEK_EINVAL    -1  /* invalid argument */
+#define OGG_SEEK_EREAD     -2  /* read callback failed */
+#define OGG_SEEK_ENOSEEK   -3  /* datasource is not seekable */
+#define OGG_SEEK_ENOSTREAM -4  /* no logical stream with the given serialno */
+#define OGG_SEEK_ERANGE    -5  /* target granule is beyond the end of stream */
+
 /* Ogg BITSTREAM PRIMITIVES: bitstream ************************/
 
 extern void  oggpack_writeinit(oggpack_buffer *b);
@@ -177,6 +207,13 @@ extern int      ogg_sync_pageout(ogg_sync_state *oy, ogg_page *og);
 extern int      ogg_stream_pagein(ogg_stream_state *os, ogg_page *og);
 extern int      ogg_stream_packetout(ogg_stream_state *os,ogg_packet *op);
 extern int      ogg_stream_packetpeek(ogg_stream_state *os,ogg_packet *op);
+
+/* Ogg BITSTREAM PRIMITIVES: seeking **************************/
+
+extern int      ogg_sync_seek(ogg_sync_state *oy, ogg_stream_state *os,
+                              long serialno, ogg_int64_t target,
+                              const ogg_seek_callbacks *cb,
+                              void *datasource);
 
 /* Ogg BITSTREAM PRIMITIVES: general ***************************/
 

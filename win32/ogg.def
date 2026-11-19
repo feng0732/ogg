@@ -57,6 +57,8 @@ ogg_stream_pagein
 ogg_stream_packetout
 ogg_stream_packetpeek
 ;
+ogg_sync_seek
+;
 ogg_stream_init
 ogg_stream_clear
 ogg_stream_reset
